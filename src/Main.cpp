@@ -3,6 +3,11 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <getopt.h>
+#include <string>
+#include <sstream>
+#include <vector>
+#include <tuple>
+#include <stdexcept>
 
 #include "opencv/cv.h"
 #include "opencv/highgui.h"
@@ -12,7 +17,7 @@ using namespace cv;
 
 void help(){
     printf("ihmontage - brings multiple videos of the same game into a single movie.\n");
-    printf("usage:\tihmontage [options] <1st video> <2nd video> <output path>\n");
+    printf("usage:\tihmontage [options] <1st video>:<start_second> <2nd video>:<start_second> <output path>\n");
     printf("options: \n");
     printf("\t--help\tdisplay this help\n");
     printf("\t--verbose\toutput more information during video processing\n");
@@ -61,14 +66,38 @@ void printVideoMetadata(VideoCapture input){
     << "], Codec [" << input.get(CV_CAP_PROP_FOURCC) << "], # of frames [" << input.get(CV_CAP_PROP_FRAME_COUNT) << "]"<< endl;
 }
 
-void outputFrame(Mat &frame, VideoWriter &writer, double distance, int width, int height){
+void outputFrame(Mat &frame, VideoWriter &writer, double distance, int width, int height, bool verbose){
     if(!frame.empty()){
         Mat output;
         resize(frame, output, Size(width, height));
         writer << output;
         putText(output, "Distance: " + std::to_string(distance), cvPoint(30,30),
                 FONT_HERSHEY_COMPLEX_SMALL, 0.8, cvScalar(200,200,250), 1, CV_AA);
-    //    imshow("edges", output);
+        if(verbose) imshow("edges", output);
+    }
+}
+
+std::vector<std::string> &split(const std::string &s, char delim, std::vector<std::string> &elems) {
+    std::stringstream ss(s);
+    std::string item;
+    while (std::getline(ss, item, delim)) {
+        elems.push_back(item);
+    }
+    return elems;
+}
+
+std::vector<std::string> split(const std::string &s, char delim) {
+    std::vector<std::string> elems;
+    split(s, delim, elems);
+    return elems;
+}
+
+std::tuple<std::string, int> parseInputPath(const std::string &line){
+    std::vector<std::string> pair = split(line, ':');
+    if(pair.size() < 2){
+        return std::make_tuple(line, 0);
+    } else {
+        return std::make_tuple(pair[0], std::stoi(pair[1]));
     }
 }
 
@@ -76,7 +105,8 @@ int main (int argc, char *argv[])
 {
     MovingAverage movingAvgA(10), movingAvgB(10);
     static int verboseFlag, helpFlag;
-    string pathA, pathB, outputPath;
+    std::tuple<std::string, int> pathA, pathB;
+    std::string outputPath;
     int outputWidth = 400, outputHeight = 200, codec = CV_FOURCC('m', 'p', '4', 'v');
     
     while (1)
@@ -147,28 +177,28 @@ int main (int argc, char *argv[])
         help();
         return -1;
     } else {
-        pathA = argv[optind];
-        pathB = argv[optind + 1];
+        pathA = parseInputPath(argv[optind]);
+        pathB = parseInputPath(argv[optind + 1]);
         outputPath = argv[optind + 2];
     }
     
-    VideoCapture inputA(pathA);
+    VideoCapture inputA(std::get<0>(pathA));
     if(!inputA.isOpened()){
-        cerr  << "Could not open [" << pathA << "]" << endl;
+        cerr  << "Could not open [" << std::get<0>(pathA) << "]" << endl;
         return -1;
     }
     
-    inputA.set(CV_CAP_PROP_POS_MSEC, 2000);
+    inputA.set(CV_CAP_PROP_POS_MSEC, std::get<1>(pathA) * 1000);
     
     if(verboseFlag) printVideoMetadata(inputA);
     
-    VideoCapture inputB(pathB);
+    VideoCapture inputB(std::get<0>(pathB));
     if(!inputB.isOpened()){
-        cerr  << "Could not open [" << pathB << "]" << endl;
+        cerr  << "Could not open [" << std::get<0>(pathB) << "]" << endl;
         return -1;
     }
     
-    inputB.set(CV_CAP_PROP_POS_MSEC, 2000);
+    inputB.set(CV_CAP_PROP_POS_MSEC, std::get<1>(pathB) * 1000);
     
     if(verboseFlag) printVideoMetadata(inputB);
     
@@ -182,10 +212,9 @@ int main (int argc, char *argv[])
     namedWindow("edges", CV_WINDOW_NORMAL);
     resizeWindow("edges", outputWidth, outputHeight);
     
-    int framesA = inputA.get(CV_CAP_PROP_FRAME_COUNT) - inputA.get(CV_CAP_PROP_POS_FRAMES);
-    int framesB = inputB.get(CV_CAP_PROP_FRAME_COUNT) - inputB.get(CV_CAP_PROP_POS_FRAMES);
-    
     bool hasMoreA = true, hasMoreB = true;
+    
+    int latestViewNumber = -1;
     
     do {
 
@@ -194,13 +223,21 @@ int main (int argc, char *argv[])
         if(hasMoreA) hasMoreA = inputA.read(frameA);
         if(hasMoreB) hasMoreB = inputB.read(frameB);
         
+        
         double distanceA = (hasMoreA)? movingAvgA.nextFrame(frameA) : 0;
         double distanceB = (hasMoreB)? movingAvgB.nextFrame(frameB) : 0;
         
+        int currentViewNumber = (distanceA > distanceB)? 0 : 1;
+        
+        if(currentViewNumber != latestViewNumber && verboseFlag) {
+            printf("Switched to view %d at %d second\n", currentViewNumber, (int)(currentViewNumber == 0 ? inputA : inputB).get(CV_CAP_PROP_POS_MSEC));
+            latestViewNumber = currentViewNumber;
+        }
+        
         if(distanceA > distanceB){
-            outputFrame(frameA, output, distanceA, outputWidth, outputHeight);
+            outputFrame(frameA, output, distanceA, outputWidth, outputHeight, verboseFlag);
         } else {
-            outputFrame(frameB, output, distanceB, outputWidth, outputHeight);
+            outputFrame(frameB, output, distanceB, outputWidth, outputHeight, verboseFlag);
         }
         
         if(waitKey(1) >= 0) break;
@@ -209,6 +246,5 @@ int main (int argc, char *argv[])
 
     output.release();
     
-    // Exit
     return 0;
 }
